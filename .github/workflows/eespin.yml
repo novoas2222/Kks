@@ -1,0 +1,141 @@
+name: Respin Original wattOS R13 ISO
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  respin-iso:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            squashfs-tools \
+            xorriso \
+            isolinux \
+            syslinux-utils \
+            wget
+
+      - name: Download Original wattOS R13 ISO
+        run: |
+          mkdir -p iso_work
+          cd iso_work
+          # Download official wattOS R13 ISO
+          wget -O original_wattos.iso "https://www.planetwatt.com/r13-downloads/" || {
+            # Fallback direct link if redirect fails
+            wget -O original_wattos.iso "https://sourceforge.net/projects/wattos/files/wattOS-R13.iso/download"
+          }
+
+      - name: Extract ISO and SquashFS
+        run: |
+          cd iso_work
+          mkdir iso_extracted
+          osirrox -indev original_wattos.iso -extract / iso_extracted
+          
+          # Find and extract filesystem.squashfs
+          mkdir squashfs_root
+          SQUASH_PATH=$(find iso_extracted -name "filesystem.squashfs")
+          sudo unsquashfs -d squashfs_root "$SQUASH_PATH"
+
+      - name: Chroot and Purge Unwanted Packages
+        run: |
+          cd iso_work
+          
+          # Bind system mounts for chroot environment
+          sudo mount --bind /dev squashfs_root/dev
+          sudo mount --bind /run squashfs_root/run
+          sudo mount -t proc proc squashfs_root/proc
+          sudo mount -t sysfs sysfs squashfs_root/sys
+
+          # Copy DNS configuration into chroot
+          sudo cp /etc/resolv.conf squashfs_root/etc/resolv.conf
+
+          # Run package removals inside the wattOS environment
+          sudo chroot squashfs_root /bin/bash -c "
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+
+            # Purge user-requested bloat & hardware drivers
+            apt-get purge -y \
+              gthumb \
+              imagemagick \
+              imagemagick-6-common \
+              xscreensaver \
+              xscreensaver-data \
+              xscreensaver-gl \
+              atril \
+              evince \
+              xreader \
+              mpdf \
+              lm-sensors \
+              sensord \
+              firmware-amd-graphics \
+              firmware-nvidia-tesla-gsp \
+              amd64-microcode \
+              firmware-ast \
+              dahdi-firmware-nonfree \
+              firmware-myricom \
+              firmware-netxen \
+              firmware-qlogic \
+              firmware-cavium
+
+            # Disable unused services if present
+            systemctl disable ModemManager.service 2>/dev/null || true
+            systemctl disable avahi-daemon.service 2>/dev/null || true
+
+            # Cleanup dependencies and temporary apt cache
+            apt-get autoremove --purge -y
+            apt-get clean
+            rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+          "
+
+          # Unmount filesystems
+          sudo umount -lf squashfs_root/dev
+          sudo umount -lf squashfs_root/run
+          sudo umount -lf squashfs_root/proc
+          sudo umount -lf squashfs_root/sys
+
+      - name: Rebuild SquashFS
+        run: |
+          cd iso_work
+          SQUASH_PATH=$(find iso_extracted -name "filesystem.squashfs")
+          
+          # Remove old squashfs file and generate updated compressed image
+          sudo rm -f "$SQUASH_PATH"
+          sudo mksquashfs squashfs_root "$SQUASH_PATH" -b 1048576 -comp xz -Xbcj x86
+
+      - name: Update MD5 Checksums
+        run: |
+          cd iso_work/iso_extracted
+          if [ -f md5sum.txt ]; then
+            sudo bash -c 'md5sum $(find . -type f ! -name "md5sum.txt") > md5sum.txt'
+          fi
+
+      - name: Repack ISO Image
+        run: |
+          cd iso_work
+          xorriso -as mkisofs \
+            -r -V "wattOS-R13-Custom" \
+            -J -joliet-long \
+            -b isolinux/isolinux.bin \
+            -c isolinux/boot.cat \
+            -no-emul-boot -boot-load-size 4 -boot-info-table \
+            -eltorito-alt-boot \
+            -e boot/grub/efi.img \
+            -no-emul-boot \
+            -o ../wattOS-R13-Custom-amd64.iso \
+            iso_extracted
+
+      - name: Upload Custom ISO Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wattOS-R13-Custom-ISO
+          path: wattOS-R13-Custom-amd64.iso
+          retention-days: 7
