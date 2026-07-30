@@ -27,20 +27,18 @@ jobs:
         run: |
           mkdir -p iso_work
           cd iso_work
-          # Download official wattOS R13 ISO
-          wget -O original_wattos.iso "https://www.planetwatt.com/r13-downloads/" || {
-            # Fallback direct link if redirect fails
-            wget -O original_wattos.iso "https://sourceforge.net/projects/wattos/files/wattOS-R13.iso/download"
-          }
+          # Download directly from official mirror
+          wget -O original_wattos.iso "https://extantpc.com/iso/wattOS-R13.iso"
 
       - name: Extract ISO and SquashFS
         run: |
           cd iso_work
-          mkdir iso_extracted
+          mkdir -p iso_extracted squashfs_root
+          
+          # Extract ISO contents
           osirrox -indev original_wattos.iso -extract / iso_extracted
           
-          # Find and extract filesystem.squashfs
-          mkdir squashfs_root
+          # Locate and unpack filesystem.squashfs
           SQUASH_PATH=$(find iso_extracted -name "filesystem.squashfs")
           sudo unsquashfs -d squashfs_root "$SQUASH_PATH"
 
@@ -48,21 +46,21 @@ jobs:
         run: |
           cd iso_work
           
-          # Bind system mounts for chroot environment
+          # Bind system mounts for chroot session
           sudo mount --bind /dev squashfs_root/dev
           sudo mount --bind /run squashfs_root/run
           sudo mount -t proc proc squashfs_root/proc
           sudo mount -t sysfs sysfs squashfs_root/sys
 
-          # Copy DNS configuration into chroot
+          # Copy DNS configuration into chroot for network operations
           sudo cp /etc/resolv.conf squashfs_root/etc/resolv.conf
 
-          # Run package removals inside the wattOS environment
+          # Perform package purge inside the chroot environment
           sudo chroot squashfs_root /bin/bash -c "
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
 
-            # Purge user-requested bloat & hardware drivers
+            # Purge specified apps, document viewers, screensavers, and unused firmware
             apt-get purge -y \
               gthumb \
               imagemagick \
@@ -86,17 +84,17 @@ jobs:
               firmware-qlogic \
               firmware-cavium
 
-            # Disable unused services if present
+            # Disable unused background daemons if present
             systemctl disable ModemManager.service 2>/dev/null || true
             systemctl disable avahi-daemon.service 2>/dev/null || true
 
-            # Cleanup dependencies and temporary apt cache
+            # Remove residual configurations and clear apt cache
             apt-get autoremove --purge -y
             apt-get clean
             rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
           "
 
-          # Unmount filesystems
+          # Clean up mounts
           sudo umount -lf squashfs_root/dev
           sudo umount -lf squashfs_root/run
           sudo umount -lf squashfs_root/proc
@@ -107,7 +105,7 @@ jobs:
           cd iso_work
           SQUASH_PATH=$(find iso_extracted -name "filesystem.squashfs")
           
-          # Remove old squashfs file and generate updated compressed image
+          # Replace old squashfs with newly modified system image
           sudo rm -f "$SQUASH_PATH"
           sudo mksquashfs squashfs_root "$SQUASH_PATH" -b 1048576 -comp xz -Xbcj x86
 
@@ -118,7 +116,7 @@ jobs:
             sudo bash -c 'md5sum $(find . -type f ! -name "md5sum.txt") > md5sum.txt'
           fi
 
-      - name: Repack ISO Image
+      - name: Repack Bootable ISO Image
         run: |
           cd iso_work
           xorriso -as mkisofs \
@@ -130,6 +128,7 @@ jobs:
             -eltorito-alt-boot \
             -e boot/grub/efi.img \
             -no-emul-boot \
+            -isohybrid-gpt-basdat \
             -o ../wattOS-R13-Custom-amd64.iso \
             iso_extracted
 
